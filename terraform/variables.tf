@@ -54,3 +54,9 @@ variable "ssh_ingress_cidr" {
   type        = string
   default     = ""
 }
+
+variable "instance_profile" {
+  description = "IAM instance profile created by scripts/infra/fencing-iam.sh."
+  type        = string
+  default     = "etcfs-nodes"
+}

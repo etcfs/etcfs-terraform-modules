@@ -10,10 +10,6 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.4"
     }
-    time = {
-      source  = "hashicorp/time"
-      version = "~> 0.12"
-    }
   }
 }
 
@@ -125,73 +121,29 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   description       = "all egress"
 }
 
-# ---- IAM: the fencing role, per-cluster ----
+# ---- IAM: the fencing instance profile ----
 #
-# fencing-iam.sh creates one permanent account-wide role named "etcfs-nodes"
-# shared by every bash-provisioned cluster. This module names its role after
-# the cluster instead, so a Terraform-managed cluster owns its own role and
-# can be destroyed without touching a cluster the scripts provisioned.
+# Referenced, not created. fencing-iam.sh creates one permanent, account-wide
+# role and instance profile named "etcfs-nodes" that every EtcFS node runs
+# under, deliberately outside any cluster's lifecycle so tearing a cluster
+# down never revokes it.
 #
-# Without these permissions the daemon degrades to single-signal fencing
-# (generation bump on lease expiry, no detach) — that stops a fenced node
-# publishing metadata, it does not stop it writing bytes to the device.
+# Managing it here instead would mean this module needs iam:CreateRole,
+# iam:TagRole, iam:ListRolePolicies and friends. That is a strictly larger
+# permission set than provisioning the cluster otherwise requires, for a
+# resource that by design outlives the cluster — and an identity that can
+# create EC2 instances routinely cannot write IAM at all. Hit exactly that
+# on 2026-08-12: apply failed on iam:TagRole, then again on
+# iam:ListRolePolicies, against an account where fencing-iam.sh had already
+# put the working profile in place.
+#
+# Bootstrap it once per account with `./scripts/infra/fencing-iam.sh create`.
+# Without it the daemon degrades to single-signal fencing (generation bump on
+# lease expiry, no detach) — that stops a fenced node publishing metadata, it
+# does not stop it writing bytes to the device.
 
-data "aws_iam_policy_document" "assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
-}
-
-data "aws_iam_policy_document" "node" {
-  statement {
-    sid       = "FencingDetachReattach"
-    actions   = ["ec2:DetachVolume", "ec2:AttachVolume"]
-    resources = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*:*:instance/*"]
-  }
-
-  # AWS supports no resource-level permissions for these Describe* actions,
-  # so "*" is an API limitation rather than a choice. All read-only.
-  statement {
-    sid = "VolumeAndPeerVisibility"
-    actions = [
-      "ec2:DescribeVolumes",
-      "ec2:DescribeVolumeStatus",
-      "ec2:DescribeInstances",
-      "ec2:DescribeTags",
-    ]
-    resources = ["*"]
-  }
-}
-
-resource "aws_iam_role" "node" {
-  name               = "${var.cluster_name}-nodes"
-  description        = "EtcFS node role (fencing detach/reattach, peer visibility)"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
-  tags               = local.tags
-}
-
-resource "aws_iam_role_policy" "node" {
-  name   = "etcfs-node-permissions"
-  role   = aws_iam_role.node.id
-  policy = data.aws_iam_policy_document.node.json
-}
-
-resource "aws_iam_instance_profile" "node" {
-  name = "${var.cluster_name}-nodes"
-  role = aws_iam_role.node.name
-  tags = local.tags
-}
-
-# IAM is eventually consistent: RunInstances rejects a profile whose role
-# attachment just landed, with a confusing "Invalid IAM Instance Profile
-# name". fencing-iam.sh sleeps 10s for the same reason.
-resource "time_sleep" "iam_propagation" {
-  depends_on      = [aws_iam_instance_profile.node]
-  create_duration = "15s"
+data "aws_iam_instance_profile" "node" {
+  name = var.instance_profile
 }
 
 # ---- Shared raw EBS volume (io2 Multi-Attach, never formatted) ----
@@ -217,7 +169,7 @@ resource "aws_instance" "compute" {
   subnet_id                   = data.aws_subnet.selected.id
   vpc_security_group_ids      = [aws_security_group.this.id]
   associate_public_ip_address = true
-  iam_instance_profile        = aws_iam_instance_profile.node.name
+  iam_instance_profile        = data.aws_iam_instance_profile.node.name
 
   root_block_device {
     volume_size = var.root_volume_size_gb
@@ -225,8 +177,6 @@ resource "aws_instance" "compute" {
   }
 
   tags = merge(local.tags, { Name = "${var.cluster_name}-compute-${each.key}" })
-
-  depends_on = [time_sleep.iam_propagation]
 }
 
 resource "aws_volume_attachment" "shared" {

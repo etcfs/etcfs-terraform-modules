@@ -65,3 +65,9 @@ variable "ssh_ingress_cidr" {
   type        = string
   default     = ""
 }
+
+variable "instance_profile" {
+  description = "Pre-existing IAM instance profile the nodes run under, created once per account by scripts/infra/fencing-iam.sh. Referenced rather than managed here — see the IAM section of main.tf."
+  type        = string
+  default     = "etcfs-nodes"
+}

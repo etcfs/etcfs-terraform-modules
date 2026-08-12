@@ -40,7 +40,7 @@ output "ami_id" {
 }
 
 output "instance_profile" {
-  value = aws_iam_instance_profile.node.name
+  value = data.aws_iam_instance_profile.node.name
 }
 
 # The full state file the existing bash tooling reads (scripts/infra/state.sh

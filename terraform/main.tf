@@ -34,4 +34,5 @@ module "cluster" {
   public_key_path  = var.public_key_path
   subnet_id        = var.subnet_id
   ssh_ingress_cidr = var.ssh_ingress_cidr
+  instance_profile = var.instance_profile
 }

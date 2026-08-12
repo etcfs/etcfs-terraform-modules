@@ -1,17 +1,35 @@
 # EtcFS Terraform module
 
-Declarative replacement for `scripts/infra/create-infra.sh`,
-`destroy-infra.sh` and `fencing-iam.sh`. It provisions the infrastructure an
-EtcFS cluster runs on and nothing else:
+Declarative replacement for `scripts/infra/create-infra.sh` and
+`destroy-infra.sh`. It provisions the infrastructure an EtcFS cluster runs
+on and nothing else:
 
 | Resource | Replaces |
 |---|---|
 | `aws_key_pair` | key import in `create-infra.sh` |
 | `aws_security_group` + rules | SG creation in `create-infra.sh` |
-| `aws_iam_role` / `aws_iam_instance_profile` | `fencing-iam.sh` |
 | `aws_ebs_volume` (io2, Multi-Attach) | shared raw device |
 | `aws_instance` (× `node_count`) | compute nodes, etcd colocated |
 | `aws_volume_attachment` | `attach-volume` loop |
+
+## Prerequisite: the fencing instance profile
+
+Run this once per AWS account, before the first apply:
+
+```bash
+./scripts/infra/fencing-iam.sh create
+```
+
+The module *references* the resulting `etcfs-nodes` instance profile, it does
+not manage it. That role is account-wide and outlives any single cluster by
+design, and managing it here would demand `iam:CreateRole`, `iam:TagRole` and
+`iam:ListRolePolicies` — a strictly larger permission set than provisioning
+the cluster otherwise needs, which an EC2-provisioning identity often does
+not have.
+
+Without the profile the daemon degrades to single-signal fencing: it stops a
+fenced node publishing metadata, it does not stop it writing bytes to the
+device.
 
 ## What it deliberately does not do
 
@@ -55,11 +73,10 @@ Terraform-provisioned cluster.
 
 ## Coexistence with the bash path
 
-Every name is cluster-scoped (`<cluster_name>-key`, `<cluster_name>-sg`,
-`<cluster_name>-nodes`), so a Terraform cluster never adopts or deletes the
-account-wide `etcfuse-keypair` and `etcfs-nodes` role that `create-infra.sh`
-and `fencing-iam.sh` share between bash-provisioned clusters. Run both at
-once by giving them different `cluster_name` values.
+Every name is cluster-scoped (`<cluster_name>-key`, `<cluster_name>-sg`), so a Terraform cluster never adopts or deletes the
+account-wide `etcfuse-keypair` that `create-infra.sh` imports. Run both paths
+at once by giving them different `cluster_name` values. The `etcfs-nodes`
+instance profile is the one thing shared with the bash path, read-only.
 
 ## State
 
