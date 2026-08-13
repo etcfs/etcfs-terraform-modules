@@ -169,6 +169,31 @@ done
 [[ -n "$CLUSTER_STATE" ]] || { log "FATAL: could not elect a seed or join a cluster after 20 attempts"; exit 1; }
 
 if [[ "$CLUSTER_STATE" == "existing" ]]; then
+  # A crashed node (killed outright, not a graceful ASG scale-in) never runs
+  # the graceful-leave Lambda's `member remove` — it just stops responding,
+  # still listed as a voting member. etcd's own runbook is explicit that a
+  # dead member must be removed *before* a replacement is added: an add
+  # while a dead voter is still registered raises the quorum requirement
+  # (3-of-4) before the new member is up to help meet it, so the config
+  # change itself can wedge. Reproduced this for real by hard-killing a
+  # node with ec2:TerminateInstances (bypassing the ASG lifecycle hook) and
+  # watching the replacement's member add fail. Every joiner clears any
+  # member whose peer IP has no matching running/pending EC2 instance
+  # before adding itself — safe to run redundantly, since etcd just errors
+  # (ignored) on a member ID that's already gone.
+  mapfile -t LIVE_IPS < <(aws ec2 describe-instances --region "$REGION" \
+    --filters "Name=tag:ClusterName,Values=$CLUSTER" "Name=tag:Role,Values=etcfs-node" \
+              "Name=instance-state-name,Values=running,pending" \
+    --query 'Reservations[].Instances[].PrivateIpAddress' --output text | tr '\t' '\n')
+  while read -r MID MURL; do
+    [[ -n "$MID" ]] || continue
+    MIP=$(echo "$MURL" | sed -E 's#https?://([0-9.]+):.*#\1#')
+    printf '%s\n' "$${LIVE_IPS[@]}" | grep -qx "$MIP" || {
+      log "member $MID ($MIP) has no matching live instance — removing before joining"
+      etcdctl --endpoints="http://$SEED:2379" member remove "$MID" 2>/dev/null || true
+    }
+  done < <(etcdctl --endpoints="http://$SEED:2379" member list -w simple 2>/dev/null | awk -F', ' '{print $1, $4}')
+
   INITIAL_CLUSTER=""
   for _ in $(seq 1 15); do
     ADDOUT=$(etcdctl --endpoints="http://$SEED:2379" member add "$NODE_ID" --peer-urls="http://$PRIV_IP:2380" 2>&1) && break
