@@ -51,14 +51,16 @@ for pkg in etcfuse-meta etcfsctl; do
   dnf install -y "./$${pkg}-$${ETCFS_VERSION}-1.x86_64.rpm"
 done
 
-# ponytail: the released etcfuse RPM is built against a newer glibc than any
-# AL2023 AMI ships (GLIBC_2.38 required, AL2023 tops out at 2.34) — a CI
-# runner/target mismatch in the release pipeline, not an ASG-specific
-# problem. etcfuse-meta/etcfsctl are Go, CGO_ENABLED=0, unaffected; only the
-# C daemon needs this. Build it from source instead of installing the
-# broken release asset, same compiler invocation add-compute-node.sh uses.
-# Revert to installing the RPM once the release pipeline builds it on (or
-# targets) glibc 2.34.
+# ponytail: releases up through v0.35.0 shipped an etcfuse RPM built
+# against a newer glibc than any AL2023 AMI has (GLIBC_2.38 required,
+# AL2023 tops out at 2.34) — a CI runner/target mismatch, not an
+# ASG-specific problem. etcfuse-meta/etcfsctl are Go, CGO_ENABLED=0,
+# unaffected; only the C daemon needs this. Build it from source instead of
+# installing the broken release asset, same compiler invocation
+# add-compute-node.sh uses. Fixed in CI (.github/workflows/ci.yml now
+# builds etcfuse inside amazonlinux:2023) — revert to installing the RPM
+# once a release cut *after* that fix exists; every release up to and
+# including v0.35.0 still needs this workaround.
 dnf install -y gcc fuse3-devel >/dev/null
 curl -fsSL "https://github.com/$GITHUB_REPO/archive/refs/tags/v$${ETCFS_VERSION}.tar.gz" -o /tmp/etcfs-src.tar.gz
 mkdir -p /tmp/etcfs-src && tar -xzf /tmp/etcfs-src.tar.gz -C /tmp/etcfs-src --strip-components=1
