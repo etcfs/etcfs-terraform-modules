@@ -130,6 +130,31 @@ resource "aws_ebs_volume" "shared" {
   tags = merge(local.tags, { Name = "${var.cluster_name}-data" })
 }
 
+# ---- Cluster-formation election ----
+# Exactly one instance must form the etcd cluster; every other concurrently
+# launched instance must join that one instead of forming its own. SSM
+# Parameter Store's put-parameter has no compare-and-swap, only an atomic
+# create — the reclaim path for a stale/dead seed had to fall back to
+# delete-then-recreate, and running the actual 3-node race twice showed
+# that isn't safe: two nodes can independently decide the seed is stale and
+# each "win" their own recreate, or steal the claim out from under a seed
+# that is still alive and simply slower to answer than one particular
+# joiner's timeout. DynamoDB's conditional PutItem is true CAS — a reclaim
+# can be conditioned on the exact previously-read item, so concurrent
+# reclaimers still converge on exactly one winner.
+resource "aws_dynamodb_table" "seed_election" {
+  name         = "${var.cluster_name}-etcfs-seed"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "cluster_name"
+
+  attribute {
+    name = "cluster_name"
+    type = "S"
+  }
+
+  tags = local.tags
+}
+
 # ---- Launch template ----
 
 resource "aws_launch_template" "node" {
@@ -165,6 +190,7 @@ resource "aws_launch_template" "node" {
     etcd_version  = var.etcd_version
     lease_ttl     = var.lease_ttl
     github_repo   = var.github_repo
+    seed_table    = aws_dynamodb_table.seed_election.name
   }))
 
   tag_specifications {
