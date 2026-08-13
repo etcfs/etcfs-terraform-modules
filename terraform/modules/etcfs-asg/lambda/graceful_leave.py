@@ -31,7 +31,20 @@ def handler(event, context):
         cluster_name, dying_ip = _lookup(instance_id)
         peer_id = _find_peer(cluster_name, instance_id)
         if peer_id and dying_ip:
-            _remove_member(peer_id, dying_ip)
+            try:
+                _remove_member(peer_id, dying_ip)
+            except Exception as e:
+                # The peer may not be SSM-registered yet (agent
+                # registration lags instance boot by up to ~60s) or the
+                # command may simply fail — either way this is best-effort:
+                # the fencing/generation-guard path already makes an
+                # ungraceful termination safe, this only saves the next
+                # scrub pass from reporting a dangling member. Swallowing
+                # here (instead of letting it propagate) also stops
+                # Lambda's automatic retry from re-running the whole
+                # handler against a lifecycle action the first attempt's
+                # `finally` below already completed.
+                print(f"member remove best-effort failed, continuing: {e}")
     finally:
         # Always complete the hook — a stuck lifecycle action blocks the
         # ASG from ever finishing termination, which is worse than a
