@@ -1,0 +1,157 @@
+#!/bin/bash
+# EtcFS ASG node bootstrap. Runs once on first boot of every instance the
+# ASG launches — scale-out is "the ASG starts an instance", nothing external
+# SSHes in. Mirrors scripts/infra/add-compute-node.sh's join logic, but
+# self-executed from released packages instead of operator-driven and
+# built from source, since a launch template has no SSH access back to a
+# dev machine.
+#
+# Peer discovery is EC2 tag search, not a fixed IP list: any instance
+# tagged ClusterName=<cluster>,Role=etcfs-node and running is a candidate
+# seed. Empty result means "I am the first node" and this instance forms a
+# new etcd cluster instead of joining one.
+set -euo pipefail
+exec > >(tee /var/log/etcfs-bootstrap.log) 2>&1
+
+CLUSTER="${cluster_name}"
+REGION="${region}"
+VOLUME_ID="${volume_id}"
+ETCFS_VERSION="${etcfs_version}"
+ETCD_VERSION="${etcd_version}"
+LEASE_TTL="${lease_ttl}"
+GITHUB_REPO="${github_repo}"
+
+log() { echo "[$$(date -u +%H:%M:%S)] $$*"; }
+
+# ---- IMDSv2 ----
+TOKEN=$$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+imds() { curl -sH "X-aws-ec2-metadata-token: $$TOKEN" "http://169.254.169.254/latest/meta-data/$$1"; }
+INSTANCE_ID=$$(imds instance-id)
+PRIV_IP=$$(imds local-ipv4)
+NODE_ID="$${CLUSTER}-$$(echo -n "$$INSTANCE_ID" | tail -c 8)"
+
+log "instance=$$INSTANCE_ID private_ip=$$PRIV_IP node_id=$$NODE_ID"
+
+# ---- Packages ----
+dnf install -y fuse3-libs jq >/dev/null
+
+if [[ -z "$$ETCFS_VERSION" ]]; then
+  ETCFS_VERSION=$$(curl -fsSL "https://api.github.com/repos/$$GITHUB_REPO/releases/latest" | jq -r .tag_name | tr -d v)
+fi
+log "installing EtcFS $$ETCFS_VERSION, etcd $$ETCD_VERSION"
+
+curl -fsSL "https://github.com/etcd-io/etcd/releases/download/$${ETCD_VERSION}/etcd-$${ETCD_VERSION}-linux-amd64.tar.gz" -o /tmp/etcd.tar.gz
+tar -xzf /tmp/etcd.tar.gz -C /usr/local/bin --strip-components=1 \
+  "etcd-$${ETCD_VERSION}-linux-amd64/etcd" "etcd-$${ETCD_VERSION}-linux-amd64/etcdctl"
+chmod +x /usr/local/bin/etcd /usr/local/bin/etcdctl
+
+cd /tmp
+for pkg in etcfuse-meta etcfsctl etcfuse; do
+  curl -fsSLO "https://github.com/$$GITHUB_REPO/releases/download/v$${ETCFS_VERSION}/$${pkg}-$${ETCFS_VERSION}-1.x86_64.rpm"
+  dnf install -y "./$${pkg}-$${ETCFS_VERSION}-1.x86_64.rpm"
+done
+
+mkdir -p /mnt/etcfuse /run/etcfuse /var/lib/etcd
+
+# ---- Attach the shared Multi-Attach volume to myself ----
+log "attaching volume $$VOLUME_ID"
+aws ec2 attach-volume --region "$$REGION" --volume-id "$$VOLUME_ID" \
+  --instance-id "$$INSTANCE_ID" --device /dev/sdf || log "attach-volume: already attached or racing another node, continuing"
+for _ in $$(seq 1 15); do
+  [[ -e /dev/nvme1n1 || -e /dev/xvdf ]] && break
+  sleep 2
+done
+DEVICE=/dev/nvme1n1
+[[ -e "$$DEVICE" ]] || DEVICE=/dev/xvdf
+
+# ---- Discover peers already running in this cluster ----
+mapfile -t PEERS < <(aws ec2 describe-instances --region "$$REGION" \
+  --filters "Name=tag:ClusterName,Values=$$CLUSTER" "Name=tag:Role,Values=etcfs-node" \
+            "Name=instance-state-name,Values=running,pending" \
+  --query 'Reservations[].Instances[].PrivateIpAddress' --output text | tr '\t' '\n' | grep -v "^$$PRIV_IP$$" || true)
+
+ENDPOINTS="http://$$PRIV_IP:2379"
+if [[ "$${#PEERS[@]}" -eq 0 ]]; then
+  log "no running peers found — forming a new etcd cluster"
+  INITIAL_CLUSTER="$$NODE_ID=http://$$PRIV_IP:2380"
+  CLUSTER_STATE=new
+else
+  SEED="$${PEERS[0]}"
+  log "joining existing cluster via seed $$SEED"
+  INITIAL_CLUSTER=""
+  for _ in $$(seq 1 15); do
+    ADDOUT=$$(etcdctl --endpoints="http://$$SEED:2379" member add "$$NODE_ID" --peer-urls="http://$$PRIV_IP:2380" 2>&1) && break
+    if echo "$$ADDOUT" | grep -q "Peer URLs already exists"; then
+      break
+    fi
+    sleep 3
+  done
+  INITIAL_CLUSTER=$$(echo "$$ADDOUT" | grep '^ETCD_INITIAL_CLUSTER=' | cut -d= -f2- | tr -d '"')
+  if [[ -z "$$INITIAL_CLUSTER" ]]; then
+    INITIAL_CLUSTER=$$(etcdctl --endpoints="http://$$SEED:2379" member list -w simple 2>/dev/null \
+      | awk -F', ' '{print $$3"="$$4}' | paste -sd, -)
+  fi
+  [[ -n "$$INITIAL_CLUSTER" ]] || { log "FATAL: could not join etcd cluster via $$SEED"; exit 1; }
+  CLUSTER_STATE=existing
+  for p in "$${PEERS[@]}"; do ENDPOINTS+=",http://$$p:2379"; done
+fi
+
+# ---- etcd ----
+cat >/etc/systemd/system/etcd.service <<UNIT
+[Unit]
+Description=etcd (EtcFS metadata store)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/etcd --name $$NODE_ID --data-dir /var/lib/etcd \\
+  --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://$$PRIV_IP:2379 \\
+  --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://$$PRIV_IP:2380 \\
+  --initial-cluster "$$INITIAL_CLUSTER" --initial-cluster-state $$CLUSTER_STATE \\
+  --auto-compaction-mode revision --auto-compaction-retention 100000 \\
+  --quota-backend-bytes 8589934592
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now etcd
+
+# ---- EtcFS daemons: drop-in overrides on top of the package units, per
+# docs/deployment/configuration.md, rather than editing the shipped
+# ExecStart in place so a package upgrade doesn't silently drop the flags. ----
+mkdir -p /etc/systemd/system/etcfuse-meta.service.d
+cat >/etc/systemd/system/etcfuse-meta.service.d/override.conf <<UNIT
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/etcfuse-meta \\
+  --listen=/run/etcfuse/etcfuse.sock \\
+  --etcd-endpoints=$$ENDPOINTS \\
+  --node-id=$$NODE_ID --cluster-name=$$CLUSTER \\
+  --lease-ttl=$$LEASE_TTL --block-device=$$DEVICE \\
+  --ebs-volume-id=$$VOLUME_ID --ec2-instance-id=$$INSTANCE_ID \\
+  --log-level=1
+UNIT
+
+mkdir -p /etc/systemd/system/etcfuse.service.d
+cat >/etc/systemd/system/etcfuse.service.d/override.conf <<UNIT
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/etcfuse --socket=/run/etcfuse/etcfuse.sock --node-id=$$NODE_ID --log-level=1 /mnt/etcfuse
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now etcfuse-meta
+sleep 4
+systemctl enable --now etcfuse
+
+for _ in $$(seq 1 20); do
+  mountpoint -q /mnt/etcfuse && break
+  sleep 1
+done
+mountpoint -q /mnt/etcfuse || { log "FATAL: EtcFS never mounted"; journalctl -u etcfuse -u etcfuse-meta --no-pager | tail -60; exit 1; }
+
+log "node $$NODE_ID up and mounted"
