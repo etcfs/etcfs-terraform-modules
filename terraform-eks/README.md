@@ -4,7 +4,7 @@ Provisions a complete, working EtcFS-on-Kubernetes cluster in one
 `terraform apply`: EKS control plane, worker nodes, a shared io2
 Multi-Attach EBS volume, EtcFS's own etcd and daemon pair, and the CSI
 driver — the same stack validated by hand in
-[`docs/reports/csi-reports/2026-08-12-eks-csi-driver-validation.md`](../../docs/reports/csi-reports/2026-08-12-eks-csi-driver-validation.md),
+[`docs/reports/csi-reports/eks-csi-driver-validation.md`](../../docs/reports/csi-reports/eks-csi-driver-validation.md),
 reproducible here without the manual `eksctl`/`kubectl`/`helm` sequence that
 report describes.
 

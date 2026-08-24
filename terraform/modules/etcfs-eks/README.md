@@ -5,7 +5,7 @@ control plane, self-managed worker nodes joined to it, a shared io2
 Multi-Attach EBS volume attached to every node, EtcFS's own etcd and daemon
 pair, and the CSI driver installed via its Helm chart. This is the
 Terraform equivalent of the manual `eksctl` + `kubectl` + `helm` sequence in
-[`docs/reports/csi-reports/2026-08-12-eks-csi-driver-validation.md`](../../../../docs/reports/csi-reports/2026-08-12-eks-csi-driver-validation.md).
+[`docs/reports/csi-reports/eks-csi-driver-validation.md`](../../../../docs/reports/csi-reports/eks-csi-driver-validation.md).
 
 Use it via [`infra/terraform-eks/`](../../../terraform-eks), which wraps it
 as a standalone root module with its own state — see that directory's
