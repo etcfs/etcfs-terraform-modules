@@ -12,6 +12,7 @@ preserved in the split.
 | [`terraform/`](terraform) | Reusable modules (`modules/etcfs-cluster`, `modules/etcfs-asg`, `modules/etcfs-eks`) plus a standalone EC2-only root module |
 | [`terraform-asg/`](terraform-asg) | Standalone Auto Scaling Group root module |
 | [`terraform-eks/`](terraform-eks) | Standalone EKS root module, wraps `terraform/modules/etcfs-eks` |
+| [`cloudformation/`](cloudformation) | CloudFormation equivalent of the ASG module; renders and runs the same node-bootstrap user-data rather than reimplementing it |
 
 Each directory has its own `README.md` with usage details.
 

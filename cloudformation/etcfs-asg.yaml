@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  EtcFS cluster in an Auto Scaling Group. The join protocol is not duplicated
+  here: this stack's user-data fetches the Terraform module's
+  templates/user-data.sh.tftpl from GitHub, renders it, and runs it, so both
+  deployment paths share one implementation of seed election, etcd member add
+  and stale-member cleanup.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: etcfuse
+    Description: Namespaces the etcd keys, the EC2 tags and the seed-election table.
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: >-
+      One AZ only. EBS Multi-Attach is AZ-scoped, so a node outside the
+      volume's AZ could never attach it.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Must be in AvailabilityZone.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  InstanceProfile:
+    Type: String
+    Default: etcfs-nodes
+    Description: >-
+      Instance profile from scripts/infra/fencing-iam.sh in etcfs/etcfs. Needs
+      the fencing EC2 permissions, dynamodb:PutItem/GetItem on the seed table,
+      and AmazonSSMManagedInstanceCore.
+  InstanceType:
+    Type: String
+    Default: m5.large
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  MinSize:
+    Type: Number
+    Default: 3
+  MaxSize:
+    Type: Number
+    Default: 6
+  DesiredCapacity:
+    Type: Number
+    Default: 3
+  VolumeSizeGb:
+    Type: Number
+    Default: 100
+  VolumeIops:
+    Type: Number
+    Default: 3000
+  RootVolumeSizeGb:
+    Type: Number
+    Default: 20
+  EtcfsVersion:
+    Type: String
+    Default: ""
+    Description: EtcFS release to install; empty installs the latest release.
+  EtcdVersion:
+    Type: String
+    Default: v3.5.18
+  LeaseTtl:
+    Type: String
+    Default: 10s
+  GithubRepo:
+    Type: String
+    Default: etcfs/etcfs
+    Description: Repository the EtcFS release packages are fetched from.
+  TerraformRepo:
+    Type: String
+    Default: etcfs/etcfs-terraform-modules
+    Description: Repository holding the shared user-data template.
+  UserDataRef:
+    Type: String
+    Default: main
+    Description: >-
+      Branch or tag of TerraformRepo to fetch the template from. Pin it to a
+      tag for a reproducible stack — "main" re-renders whatever is on the
+      branch at each instance launch.
+
+Resources:
+  # Exactly one instance must form the etcd cluster and the rest must join it.
+  # Conditional PutItem on this table is the compare-and-swap that decides
+  # which — see the user-data template for why an SSM parameter or an EC2 tag
+  # is not enough.
+  SeedElectionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ClusterName}-etcfs-seed"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cluster_name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cluster_name
+          KeyType: HASH
+
+  # The raw shared device. Nodes attach it to themselves in user-data;
+  # Multi-Attach permits every node in the ASG to hold it at once.
+  SharedVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      VolumeType: io2
+      Size: !Ref VolumeSizeGb
+      Iops: !Ref VolumeIops
+      MultiAttachEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-data"
+        - Key: ClusterName
+          Value: !Ref ClusterName
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "EtcFS cluster ${ClusterName}"
+      VpcId: !Ref VpcId
+
+  # Self-referencing, so every node reaches every other node's etcd and
+  # metrics without naming an address the ASG cannot know in advance.
+  IntraClusterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2379
+      ToPort: 2380
+
+  MetricsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9090
+      ToPort: 9100
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ClusterName}-cfn"
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        SecurityGroupIds:
+          - !Ref NodeSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref RootVolumeSizeGb
+              VolumeType: gp3
+        MetadataOptions:
+          # The shared template's imds() helper is IMDSv2-only.
+          HttpTokens: required
+          HttpEndpoint: enabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: ClusterName
+                Value: !Ref ClusterName
+              # The join path finds its peers by this tag pair. Changing
+              # either detaches a node from the cluster it meant to join.
+              - Key: Role
+                Value: etcfs-node
+              - Key: Name
+                Value: !Sub "${ClusterName}-node"
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Fetch and run the Terraform module's node bootstrap. Everything
+            # hard here — electing one seed, joining etcd rather than forming
+            # a second cluster, clearing a crashed node's member entry first —
+            # lives in that one script, and a copy of it in this template
+            # would be a second implementation to keep in step.
+            set -euo pipefail
+            exec > >(tee /var/log/etcfs-cfn-bootstrap.log) 2>&1
+
+            dnf install -y python3 curl >/dev/null
+
+            TPL=https://raw.githubusercontent.com/${TerraformRepo}/${UserDataRef}/terraform/modules/etcfs-asg/templates/user-data.sh.tftpl
+            curl -fsSL "${!TPL}" -o /tmp/user-data.tftpl
+
+            # The template is Terraform's templatefile() syntax: ${!x} is a
+            # variable to substitute, and $$ escapes a literal dollar that
+            # belongs to the shell. Render both, then run the result.
+            export TF_CLUSTER_NAME='${ClusterName}'
+            export TF_REGION='${AWS::Region}'
+            export TF_VOLUME_ID='${SharedVolume}'
+            export TF_ETCFS_VERSION='${EtcfsVersion}'
+            export TF_ETCD_VERSION='${EtcdVersion}'
+            export TF_LEASE_TTL='${LeaseTtl}'
+            export TF_GITHUB_REPO='${GithubRepo}'
+            export TF_SEED_TABLE='${SeedElectionTable}'
+
+            python3 - <<'RENDER'
+            import os, re, sys
+
+            values = {k[3:].lower(): v for k, v in os.environ.items() if k.startswith("TF_")}
+
+            def replace(m):
+                if m.group(0) == "$$":
+                    return "$"
+                name = m.group(1)
+                if name not in values:
+                    sys.exit("template variable not provided by the stack: " + name)
+                return values[name]
+
+            with open("/tmp/user-data.tftpl") as f:
+                rendered = re.sub(r"\$\$|\$\{(\w+)\}", replace, f.read())
+            with open("/tmp/user-data.sh", "w") as f:
+                f.write(rendered)
+            RENDER
+
+            bash /tmp/user-data.sh
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${ClusterName}-asg"
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      # One subnet, matching the volume's AZ — see AvailabilityZone.
+      VPCZoneIdentifier:
+        - !Ref SubnetId
+      HealthCheckType: EC2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: ClusterName
+          Value: !Ref ClusterName
+          PropagateAtLaunch: true
+        - Key: Role
+          Value: etcfs-node
+          PropagateAtLaunch: true
+
+Outputs:
+  VolumeId:
+    Description: The shared io2 Multi-Attach volume every node attaches.
+    Value: !Ref SharedVolume
+  SeedTable:
+    Description: Seed-election table; its single row names the node that formed the cluster.
+    Value: !Ref SeedElectionTable
+  SecurityGroupId:
+    Value: !Ref NodeSecurityGroup
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
