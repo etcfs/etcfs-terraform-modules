@@ -84,3 +84,7 @@ variable "csi_image_repository" {
 variable "csi_image_tag" {
   type = string
 }
+
+variable "csi_chart_version" {
+  type = string
+}

@@ -8,7 +8,7 @@ terraform {
     }
   }
 
-  # Local state, same reasoning as infra/terraform: this earns a remote
+  # Local state, same reasoning as terraform: this earns a remote
   # backend only once more than one person applies against the same cluster.
   backend "local" {
     path = "terraform.tfstate"

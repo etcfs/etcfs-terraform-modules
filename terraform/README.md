@@ -53,14 +53,14 @@ documents having already been fixed once.
 ./scripts/infra/tf-up.sh -- -var node_count=5 -var instance_type=t3.large
 
 # teardown
-terraform -chdir=infra/terraform destroy
+terraform -chdir=terraform destroy
 ```
 
 Or drive Terraform directly and hand off manually:
 
 ```bash
-terraform -chdir=infra/terraform init
-terraform -chdir=infra/terraform apply
+terraform -chdir=terraform init
+terraform -chdir=terraform apply
 ./scripts/infra/tf-export-state.sh          # -> infra-state.json
 ./scripts/infra/bootstrap-cluster.sh infra-state.json
 ./scripts/infra/run-full-test.sh
@@ -80,7 +80,7 @@ instance profile is the one thing shared with the bash path, read-only.
 
 ## State
 
-Local backend (`infra/terraform/terraform.tfstate`), gitignored. A remote
+Local backend (`terraform/terraform.tfstate`), gitignored. A remote
 backend only earns its keys once more than one person applies against the
 same cluster.
 

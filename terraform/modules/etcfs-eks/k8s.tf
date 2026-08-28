@@ -201,9 +201,11 @@ resource "kubernetes_daemon_set_v1" "etcfs" {
 # ---- CSI driver, via its own Helm chart ----
 
 resource "helm_release" "etcfs_csi" {
-  name      = "etcfs-csi"
-  chart     = "${path.module}/../../../../csi/deploy/helm/etcfs-csi"
-  namespace = kubernetes_namespace_v1.etcfs.metadata[0].name
+  name       = "etcfs-csi"
+  repository = var.csi_chart_oci
+  chart      = "etcfs-csi"
+  version    = var.csi_chart_version
+  namespace  = kubernetes_namespace_v1.etcfs.metadata[0].name
 
   values = [yamlencode({
     driverName = var.csi_driver_name

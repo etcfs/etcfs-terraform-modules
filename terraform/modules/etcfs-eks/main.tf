@@ -64,7 +64,7 @@ data "aws_subnets" "in_node_az" {
 # known to Terraform until after the ASG has launched them, which makes a
 # declarative aws_volume_attachment to a *specific* instance impossible. This
 # module needs the same io2 Multi-Attach volume on two named instances, the
-# same way infra/terraform's EC2-only module does — so nodes are aws_instance
+# same way terraform's EC2-only module does — so nodes are aws_instance
 # resources here too, joined to the cluster by the same bootstrap.sh every
 # EKS-optimized AMI ships, run from user_data instead of an ASG launch template.
 data "aws_ami" "eks_node" {
@@ -99,7 +99,7 @@ locals {
 
 # ---- IAM: cluster and node roles ----
 #
-# Unlike infra/terraform's EC2 module, these are created here rather than
+# Unlike terraform's EC2 module, these are created here rather than
 # referenced: an EKS cluster role and a node role are scoped to this cluster
 # by name and torn down with it, not an account-wide permanent resource like
 # the fencing instance profile that module deliberately leaves alone.
@@ -319,7 +319,7 @@ resource "kubernetes_config_map_v1_data" "aws_auth" {
 
 # ---- Shared raw EBS volume (io2 Multi-Attach) ----
 #
-# Same reasoning as infra/terraform's EC2 module: self-managed nodes give
+# Same reasoning as terraform's EC2 module: self-managed nodes give
 # Terraform stable instance IDs, so the attachment is declarative here too,
 # rather than the manual "query instance IDs after apply, attach by hand"
 # step the eksctl-based validation run needed.

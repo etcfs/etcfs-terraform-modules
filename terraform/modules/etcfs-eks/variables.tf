@@ -110,7 +110,7 @@ variable "etcfuse_image" {
 }
 
 variable "csi_image_repository" {
-  description = "Built from deploy/docker/Dockerfile.etcfs-csi."
+  description = "Built from github.com/etcfs/etcfs-csi-driver's Dockerfile."
   type        = string
 }
 
@@ -121,6 +121,16 @@ variable "csi_image_tag" {
 variable "csi_driver_name" {
   type    = string
   default = "csi.etcfs.io"
+}
+
+variable "csi_chart_oci" {
+  description = "OCI registry path (without the chart name) the CSI driver's Helm chart is published to by github.com/etcfs/etcfs-csi-driver's CI."
+  type        = string
+  default     = "oci://ghcr.io/etcfs/charts"
+}
+
+variable "csi_chart_version" {
+  type = string
 }
 
 variable "storage_class_name" {

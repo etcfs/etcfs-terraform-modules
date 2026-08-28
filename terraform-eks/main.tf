@@ -8,7 +8,7 @@ terraform {
     }
   }
 
-  # Local state, same reasoning as infra/terraform: this earns a remote
+  # Local state, same reasoning as terraform: this earns a remote
   # backend only once more than one person applies against the same cluster.
   backend "local" {
     path = "terraform.tfstate"
@@ -38,4 +38,5 @@ module "eks" {
   etcfuse_image        = var.etcfuse_image
   csi_image_repository = var.csi_image_repository
   csi_image_tag        = var.csi_image_tag
+  csi_chart_version    = var.csi_chart_version
 }

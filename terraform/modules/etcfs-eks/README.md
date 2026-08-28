@@ -5,9 +5,10 @@ control plane, self-managed worker nodes joined to it, a shared io2
 Multi-Attach EBS volume attached to every node, EtcFS's own etcd and daemon
 pair, and the CSI driver installed via its Helm chart. This is the
 Terraform equivalent of the manual `eksctl` + `kubectl` + `helm` sequence in
-[`docs/reports/csi-reports/eks-csi-driver-validation.md`](../../../../docs/reports/csi-reports/eks-csi-driver-validation.md).
+[`eks-csi-driver-validation.md`](https://github.com/etcfs/etcfs-docs/blob/main/reports/csi-reports/eks-csi-driver-validation.md)
+in [etcfs-docs](https://github.com/etcfs/etcfs-docs).
 
-Use it via [`infra/terraform-eks/`](../../../terraform-eks), which wraps it
+Use it via [`terraform-eks/`](../../../terraform-eks), which wraps it
 as a standalone root module with its own state — see that directory's
 `README.md` for the usage walkthrough. This directory is the reusable
 module; call it directly only if you are composing it into a larger
@@ -19,7 +20,7 @@ A managed node group is backed by an Auto Scaling Group, whose instance IDs
 are not known to Terraform until after the ASG has launched them — which
 makes a declarative `aws_volume_attachment` to a *specific* instance
 impossible. EtcFS needs the same io2 Multi-Attach volume on every node by
-instance ID, the same requirement [`infra/terraform`](../../)'s EC2-only
+instance ID, the same requirement [`terraform`](../../)'s EC2-only
 module has, so nodes here are plain `aws_instance` resources too, joined to
 the cluster with the same `/etc/eks/bootstrap.sh` a managed node group's
 launch template would run, just invoked from `user_data` instead.
@@ -28,15 +29,19 @@ launch template would run, just invoked from `user_data` instead.
 
 - **Images.** `etcfuse_meta_image`, `etcfuse_image`, `csi_image_repository`
   and `csi_image_tag` are required variables with no default — a registry is
-  account-specific. `scripts/infra/eks-build-push.sh` builds and pushes all
-  three from this repository's own Dockerfiles and prints the `-var` flags.
+  account-specific. `scripts/infra/eks-build-push.sh` (in
+  [etcfs/etcfs](https://github.com/etcfs/etcfs)) builds and pushes the first
+  two from that repository's Dockerfiles; the CSI image is built by
+  [etcfs-csi-driver](https://github.com/etcfs/etcfs-csi-driver)'s own CI.
+  `csi_chart_version` picks the matching Helm chart, published to
+  `ghcr.io/etcfs/charts/etcfs-csi` by that same CI.
 - **The `etcfs-nodes` fencing IAM profile.** Unlike the EC2 module, this one
   does not reference it: an EKS node's fencing signal is the CSI driver's
   `ControllerUnpublishVolume` hook recording an intent for
   `pkg/fencing.Controller`'s sweep to act on (see
-  [`docs/deployment/kubernetes-csi.md`](../../../../docs/deployment/kubernetes-csi.md)),
+  [`kubernetes-csi.md`](https://github.com/etcfs/etcfs-docs/blob/main/deployment/kubernetes-csi.md)),
   not the node's own IAM role calling `DetachVolume` directly.
-- **A remote Terraform backend.** Same reasoning as `infra/terraform`: local
+- **A remote Terraform backend.** Same reasoning as `terraform`: local
   state until more than one person applies against the same cluster.
 
 ## Variables worth knowing before applying

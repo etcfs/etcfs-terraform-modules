@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fmt-validate:
+    name: fmt & validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [terraform, terraform-asg, terraform-eks]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v3
+      - name: fmt
+        run: terraform -chdir=${{ matrix.dir }} fmt -check -recursive
+      - name: init
+        run: terraform -chdir=${{ matrix.dir }} init -backend=false
+      - name: validate
+        run: terraform -chdir=${{ matrix.dir }} validate
