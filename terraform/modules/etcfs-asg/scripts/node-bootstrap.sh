@@ -324,8 +324,22 @@ systemctl enable --now etcd
 #
 # Note the split is forced, not stylistic: a flag beats the file, so anything
 # named here overrides the same key below without saying so. ----
-mkdir -p /etc/etcfs
-cat >/etc/etcfs/etcfuse-meta.yaml <<CONF
+mkdir -p /etc/systemd/system/etcfuse-meta.service.d
+
+# Which of the two the settings go through depends on the binary that was
+# actually installed, not on which is nicer.
+#
+# --config reached etcfuse-meta after the last release, and an older binary
+# does not reject an unknown file — it never looks for one. A node that wrote
+# the config file anyway came up looking healthy and was not: endpoints fell
+# back to localhost, no block device was opened, and fencing quietly dropped
+# to single-signal, so the mount succeeded and every write to it returned
+# EIO. Ask the binary what it supports rather than assuming, and this starts
+# using the file on its own once a release carries the flag.
+if /usr/local/bin/etcfuse-meta --help 2>&1 | grep -q -- "-config"; then
+  log "etcfuse-meta supports --config; settings go in /etc/etcfs/etcfuse-meta.yaml"
+  mkdir -p /etc/etcfs
+  cat >/etc/etcfs/etcfuse-meta.yaml <<CONF
 etcd-endpoints: $ENDPOINTS
 cluster-name: $CLUSTER
 lease-ttl: $LEASE_TTL
@@ -333,13 +347,27 @@ block-device: $DEVICE
 ebs-volume-id: $VOLUME_ID
 log-level: 1
 CONF
-
-mkdir -p /etc/systemd/system/etcfuse-meta.service.d
-cat >/etc/systemd/system/etcfuse-meta.service.d/override.conf <<UNIT
+  # Only this node's identity stays on the command line; no shared file can
+  # carry it.
+  cat >/etc/systemd/system/etcfuse-meta.service.d/override.conf <<UNIT
 [Service]
 ExecStart=
 ExecStart=/usr/local/bin/etcfuse-meta --node-id=$NODE_ID --ec2-instance-id=$INSTANCE_ID
 UNIT
+else
+  log "etcfuse-meta $ETCFS_VERSION predates --config; passing settings as flags"
+  cat >/etc/systemd/system/etcfuse-meta.service.d/override.conf <<UNIT
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/etcfuse-meta \\
+  --listen=/run/etcfuse/etcfuse.sock \\
+  --etcd-endpoints=$ENDPOINTS \\
+  --node-id=$NODE_ID --cluster-name=$CLUSTER \\
+  --lease-ttl=$LEASE_TTL --block-device=$DEVICE \\
+  --ebs-volume-id=$VOLUME_ID --ec2-instance-id=$INSTANCE_ID \\
+  --log-level=1
+UNIT
+fi
 
 # etcfuse itself is built from source above (glibc mismatch workaround), so
 # there is no package unit to drop an override onto — write the unit whole,
