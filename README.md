@@ -12,9 +12,15 @@ preserved in the split.
 | [`terraform/`](terraform) | Reusable modules (`modules/etcfs-cluster`, `modules/etcfs-asg`, `modules/etcfs-eks`) plus a standalone EC2-only root module |
 | [`terraform-asg/`](terraform-asg) | Standalone Auto Scaling Group root module |
 | [`terraform-eks/`](terraform-eks) | Standalone EKS root module, wraps `terraform/modules/etcfs-eks` |
-| [`cloudformation/`](cloudformation) | CloudFormation equivalent of the ASG module; renders and runs the same node-bootstrap user-data rather than reimplementing it |
 
 Each directory has its own `README.md` with usage details.
+
+The node bootstrap every ASG instance runs on first boot lives at
+[`terraform/modules/etcfs-asg/scripts/node-bootstrap.sh`](terraform/modules/etcfs-asg/scripts/node-bootstrap.sh).
+It is plain bash configured through `ETCFS_*` environment variables, not a
+Terraform template, so it can be linted, run directly against a test
+instance, and reused by a launcher that is not Terraform — which is what
+[etcfs-cloudformation](https://github.com/etcfs/etcfs-cloudformation) does.
 
 ## Prerequisite: the fencing instance profile
 

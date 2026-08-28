@@ -1,0 +1,11 @@
+# Provider binaries and module cache from `terraform init`.
+.terraform/
+.terraform.lock.hcl
+
+# Local state from an apply, and any plan file.
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Built by the archive provider from lambda/graceful_leave.py at plan time.
+terraform/modules/etcfs-asg/lambda/graceful_leave.zip

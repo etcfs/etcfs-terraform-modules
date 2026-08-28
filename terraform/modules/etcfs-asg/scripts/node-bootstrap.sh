@@ -1,6 +1,6 @@
 #!/bin/bash
-# EtcFS ASG node bootstrap. Runs once on first boot of every instance the
-# ASG launches — scale-out is "the ASG starts an instance", nothing external
+# EtcFS node bootstrap. Runs once on first boot of every instance an ASG
+# launches — scale-out is "the ASG starts an instance", nothing external
 # SSHes in. Mirrors scripts/infra/add-compute-node.sh's join logic, but
 # self-executed from released packages instead of operator-driven and
 # built from source, since a launch template has no SSH access back to a
@@ -13,13 +13,26 @@
 set -euo pipefail
 exec > >(tee /var/log/etcfs-bootstrap.log) 2>&1
 
-CLUSTER="${cluster_name}"
-REGION="${region}"
-VOLUME_ID="${volume_id}"
-ETCFS_VERSION="${etcfs_version}"
-ETCD_VERSION="${etcd_version}"
-LEASE_TTL="${lease_ttl}"
-GITHUB_REPO="${github_repo}"
+# ---- Inputs.
+#
+# Plain environment variables, not a templating syntax, so this file is
+# ordinary bash: shellcheck lints it, `bash -n` parses it, and it can be run
+# directly against a test instance. Whatever launches the node — the
+# Terraform module's launch template, the CloudFormation stack, a hand
+# rollout — exports these and then runs this script unchanged.
+#
+# The four without a default have no sane one: a wrong guess would form a
+# cluster in the wrong place rather than fail, so they are required and the
+# node stops at boot if one is missing.
+CLUSTER="${ETCFS_CLUSTER_NAME:?ETCFS_CLUSTER_NAME is required}"
+REGION="${ETCFS_REGION:?ETCFS_REGION is required}"
+VOLUME_ID="${ETCFS_VOLUME_ID:?ETCFS_VOLUME_ID is required}"
+TABLE="${ETCFS_SEED_TABLE:?ETCFS_SEED_TABLE is required}"
+# Empty installs whatever the latest release is.
+ETCFS_VERSION="${ETCFS_VERSION:-}"
+ETCD_VERSION="${ETCFS_ETCD_VERSION:-v3.5.18}"
+LEASE_TTL="${ETCFS_LEASE_TTL:-10s}"
+GITHUB_REPO="${ETCFS_GITHUB_REPO:-etcfs/etcfs}"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
@@ -28,7 +41,7 @@ TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-met
 imds() { curl -sH "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
 INSTANCE_ID=$(imds instance-id)
 PRIV_IP=$(imds local-ipv4)
-NODE_ID="$${CLUSTER}-$(echo -n "$INSTANCE_ID" | tail -c 8)"
+NODE_ID="${CLUSTER}-$(echo -n "$INSTANCE_ID" | tail -c 8)"
 
 log "instance=$INSTANCE_ID private_ip=$PRIV_IP node_id=$NODE_ID"
 
@@ -40,15 +53,15 @@ if [[ -z "$ETCFS_VERSION" ]]; then
 fi
 log "installing EtcFS $ETCFS_VERSION, etcd $ETCD_VERSION"
 
-curl -fsSL "https://github.com/etcd-io/etcd/releases/download/$${ETCD_VERSION}/etcd-$${ETCD_VERSION}-linux-amd64.tar.gz" -o /tmp/etcd.tar.gz
+curl -fsSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz" -o /tmp/etcd.tar.gz
 tar -xzf /tmp/etcd.tar.gz -C /usr/local/bin --strip-components=1 \
-  "etcd-$${ETCD_VERSION}-linux-amd64/etcd" "etcd-$${ETCD_VERSION}-linux-amd64/etcdctl"
+  "etcd-${ETCD_VERSION}-linux-amd64/etcd" "etcd-${ETCD_VERSION}-linux-amd64/etcdctl"
 chmod +x /usr/local/bin/etcd /usr/local/bin/etcdctl
 
 cd /tmp
 for pkg in etcfuse-meta etcfsctl; do
-  curl -fsSLO "https://github.com/$GITHUB_REPO/releases/download/v$${ETCFS_VERSION}/$${pkg}-$${ETCFS_VERSION}-1.x86_64.rpm"
-  dnf install -y "./$${pkg}-$${ETCFS_VERSION}-1.x86_64.rpm"
+  curl -fsSLO "https://github.com/$GITHUB_REPO/releases/download/v${ETCFS_VERSION}/${pkg}-${ETCFS_VERSION}-1.x86_64.rpm"
+  dnf install -y "./${pkg}-${ETCFS_VERSION}-1.x86_64.rpm"
 done
 
 # ponytail: releases up through v0.35.0 shipped an etcfuse RPM built
@@ -62,7 +75,7 @@ done
 # once a release cut *after* that fix exists; every release up to and
 # including v0.35.0 still needs this workaround.
 dnf install -y gcc fuse3-devel >/dev/null
-curl -fsSL "https://github.com/$GITHUB_REPO/archive/refs/tags/v$${ETCFS_VERSION}.tar.gz" -o /tmp/etcfs-src.tar.gz
+curl -fsSL "https://github.com/$GITHUB_REPO/archive/refs/tags/v${ETCFS_VERSION}.tar.gz" -o /tmp/etcfs-src.tar.gz
 mkdir -p /tmp/etcfs-src && tar -xzf /tmp/etcfs-src.tar.gz -C /tmp/etcfs-src --strip-components=1
 cd /tmp/etcfs-src
 gcc -I. -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -O2 -g \
@@ -110,7 +123,6 @@ DEVICE=/dev/nvme1n1
 # concurrent reclaimers converge on exactly one winner, and staleness is
 # judged against a shared "created_at" timestamp rather than each caller's
 # own arbitrarily-timed health-check loop.
-TABLE="${seed_table}"
 STALE_SECONDS=600
 
 put_if_absent() {
@@ -203,9 +215,11 @@ for attempt in $(seq 1 20); do
   # thing is a correct outcome, not a failure.
   if LIVE_PEER=$(find_live_peer); then
     log "seed $SEED unreachable but peer $LIVE_PEER is serving — joining through it, not reclaiming"
-    repoint_if_unchanged "$LIVE_PEER" "$SEED" "$CREATED" \
-      && log "seed row repointed to $LIVE_PEER" \
-      || log "seed row repoint lost its CAS (another node got there first) — harmless, continuing"
+    if repoint_if_unchanged "$LIVE_PEER" "$SEED" "$CREATED"; then
+      log "seed row repointed to $LIVE_PEER"
+    else
+      log "seed row repoint lost its CAS (another node got there first) — harmless, continuing"
+    fi
     SEED="$LIVE_PEER"
     CLUSTER_STATE=existing
     break
@@ -244,7 +258,7 @@ if [[ "$CLUSTER_STATE" == "existing" ]]; then
   while read -r MID MURL; do
     [[ -n "$MID" ]] || continue
     MIP=$(echo "$MURL" | sed -E 's#https?://([0-9.]+):.*#\1#')
-    printf '%s\n' "$${LIVE_IPS[@]}" | grep -qx "$MIP" || {
+    printf '%s\n' "${LIVE_IPS[@]}" | grep -qx "$MIP" || {
       log "member $MID ($MIP) has no matching live instance — removing before joining"
       etcdctl --endpoints="http://$SEED:2379" member remove "$MID" 2>/dev/null || true
     }
@@ -273,7 +287,7 @@ mapfile -t PEERS < <(aws ec2 describe-instances --region "$REGION" \
             "Name=instance-state-name,Values=running,pending" \
   --query 'Reservations[].Instances[].PrivateIpAddress' --output text | tr '\t' '\n' | grep -v "^$PRIV_IP$" || true)
 ENDPOINTS="http://$PRIV_IP:2379"
-for p in "$${PEERS[@]}"; do ENDPOINTS+=",http://$p:2379"; done
+for p in "${PEERS[@]}"; do ENDPOINTS+=",http://$p:2379"; done
 
 # ---- etcd ----
 cat >/etc/systemd/system/etcd.service <<UNIT

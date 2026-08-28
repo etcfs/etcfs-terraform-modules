@@ -182,16 +182,34 @@ resource "aws_launch_template" "node" {
     http_endpoint = "enabled"
   }
 
-  user_data = base64encode(templatefile("${path.module}/templates/user-data.sh.tftpl", {
-    cluster_name  = var.cluster_name
-    region        = data.aws_region.current.region
-    volume_id     = aws_ebs_volume.shared.id
-    etcfs_version = var.etcfs_version
-    etcd_version  = var.etcd_version
-    lease_ttl     = var.lease_ttl
-    github_repo   = var.github_repo
-    seed_table    = aws_dynamodb_table.seed_election.name
-  }))
+  # An environment preamble followed by the bootstrap script verbatim, rather
+  # than templatefile() over the script itself.
+  #
+  # file() does not interpolate, so the script stays ordinary bash: every
+  # expansion in it is a real shell expansion instead of one escaped as $${}
+  # to survive Terraform, shellcheck and `bash -n` can lint it (a .tftpl is
+  # not valid bash and no linter would read it), and it can be run directly
+  # on a test instance. What is left below is eight assignments with no shell
+  # logic in them, which is where interpolation is safe.
+  #
+  # The trade is Terraform no longer catches an unsupplied value at plan time
+  # the way a templatefile() placeholder would — so the script requires the
+  # four that have no safe default and refuses to boot without them.
+  user_data = base64encode(join("\n", [
+    <<-EOT
+      #!/bin/bash
+      export ETCFS_CLUSTER_NAME=${var.cluster_name}
+      export ETCFS_REGION=${data.aws_region.current.region}
+      export ETCFS_VOLUME_ID=${aws_ebs_volume.shared.id}
+      export ETCFS_SEED_TABLE=${aws_dynamodb_table.seed_election.name}
+      export ETCFS_VERSION=${var.etcfs_version}
+      export ETCFS_ETCD_VERSION=${var.etcd_version}
+      export ETCFS_LEASE_TTL=${var.lease_ttl}
+      export ETCFS_GITHUB_REPO=${var.github_repo}
+    EOT
+    ,
+    file("${path.module}/scripts/node-bootstrap.sh"),
+  ]))
 
   tag_specifications {
     resource_type = "instance"
