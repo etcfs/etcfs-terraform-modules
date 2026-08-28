@@ -182,6 +182,16 @@ resource "aws_launch_template" "node" {
     http_endpoint = "enabled"
   }
 
+  # Gzipped, not plain base64: EC2 caps user-data at 16384 bytes *after*
+  # encoding, and base64 inflates by a third, so the real budget is ~12 KB of
+  # script. The bootstrap passed that as it grew and CreateLaunchTemplate
+  # started failing with InvalidUserData.Malformed — a hard API error at
+  # apply, with nothing wrong in the file itself. cloud-init detects the gzip
+  # magic bytes and decompresses before running, which is why this is the
+  # standard way out; it takes the same script from 23 KB encoded to about 9.
+  # The precondition below turns a future overrun back into a plan-time error
+  # instead of that API failure.
+  #
   # An environment preamble followed by the bootstrap script verbatim, rather
   # than templatefile() over the script itself.
   #
@@ -195,7 +205,7 @@ resource "aws_launch_template" "node" {
   # The trade is Terraform no longer catches an unsupplied value at plan time
   # the way a templatefile() placeholder would — so the script requires the
   # four that have no safe default and refuses to boot without them.
-  user_data = base64encode(join("\n", [
+  user_data = base64gzip(join("\n", [
     <<-EOT
       #!/bin/bash
       export ETCFS_CLUSTER_NAME=${var.cluster_name}
@@ -210,6 +220,13 @@ resource "aws_launch_template" "node" {
     ,
     file("${path.module}/scripts/node-bootstrap.sh"),
   ]))
+
+  lifecycle {
+    precondition {
+      condition     = length(base64gzip(join("\n", [file("${path.module}/scripts/node-bootstrap.sh")]))) <= 16384
+      error_message = "Encoded user-data exceeds EC2's 16384-byte limit; shrink scripts/node-bootstrap.sh or fetch it at boot instead of embedding it."
+    }
+  }
 
   tag_specifications {
     resource_type = "instance"
