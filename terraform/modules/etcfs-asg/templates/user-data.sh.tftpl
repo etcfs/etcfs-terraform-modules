@@ -119,12 +119,42 @@ put_if_absent() {
     --condition-expression "attribute_not_exists(cluster_name)" 2>/dev/null
 }
 
-reclaim_if_unchanged() {
-  local old_ip="$1" old_created="$2"
+# Point the seed row at $1, but only if it still holds exactly the item that
+# was read ($2/$3).  Used both to reclaim a dead seed's row for this node and
+# to repoint it at a surviving peer; either way the CAS is what keeps
+# concurrent writers converging on one winner.
+repoint_if_unchanged() {
+  local new_ip="$1" old_ip="$2" old_created="$3"
   aws dynamodb put-item --region "$REGION" --table-name "$TABLE" \
-    --item "{\"cluster_name\":{\"S\":\"$CLUSTER\"},\"seed_ip\":{\"S\":\"$PRIV_IP\"},\"created_at\":{\"N\":\"$(date +%s)\"}}" \
+    --item "{\"cluster_name\":{\"S\":\"$CLUSTER\"},\"seed_ip\":{\"S\":\"$new_ip\"},\"created_at\":{\"N\":\"$(date +%s)\"}}" \
     --condition-expression "seed_ip = :oip AND created_at = :ocr" \
     --expression-attribute-values "{\":oip\":{\"S\":\"$old_ip\"},\":ocr\":{\"N\":\"$old_created\"}}" 2>/dev/null
+}
+
+# Tag-discover every other node in the cluster and ask its etcd directly
+# whether it is serving.  The seed row is a bootstrap *hint*, not a liveness
+# oracle: it is written once, at cluster formation, and nothing ever
+# refreshes it — not the seed itself, not the graceful-leave Lambda.  So a
+# long-lived cluster whose original seed has since been scaled in or replaced
+# still carries a row naming a dead IP with a "created_at" months past the
+# staleness bar, and a node joining then would sail through the age check and
+# reclaim on the first attempt.  That forms a second, single-node etcd
+# cluster beside a perfectly healthy quorum — two clusters, one shared block
+# device, which is precisely the split brain everything else here exists to
+# prevent.  The staleness bar only ever protected the concurrent-boot window
+# it was written for; it says nothing about steady-state seed replacement.
+# Asking the survivors does, and it is the same tag-search the stale-member
+# scrub below already relies on.
+find_live_peer() {
+  local ip
+  for ip in $(aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:ClusterName,Values=$CLUSTER" "Name=tag:Role,Values=etcfs-node" \
+                "Name=instance-state-name,Values=running,pending" \
+      --query 'Reservations[].Instances[].PrivateIpAddress' --output text 2>/dev/null \
+      | tr '\t' '\n' | grep -v "^$PRIV_IP$" || true); do
+    curl -sf -m 3 "http://$ip:2379/health" >/dev/null 2>&1 && { echo "$ip"; return 0; }
+  done
+  return 1
 }
 
 CLUSTER_STATE=""
@@ -164,8 +194,25 @@ for attempt in $(seq 1 20); do
     continue
   fi
 
-  log "seed $SEED unreachable and $AGE sec old — attempting conditional reclaim"
-  if reclaim_if_unchanged "$SEED" "$CREATED"; then
+  # Only now, with the recorded seed both unreachable and past the staleness
+  # bar, is it worth the API calls to ask whether *any* member survives.  A
+  # peer answering /health means the cluster is alive and the row is merely
+  # out of date: join through that peer and repoint the row at it, so the
+  # next joiner gets a live hint instead of repeating this detour.  The
+  # repoint is best-effort — losing its CAS to another node doing the same
+  # thing is a correct outcome, not a failure.
+  if LIVE_PEER=$(find_live_peer); then
+    log "seed $SEED unreachable but peer $LIVE_PEER is serving — joining through it, not reclaiming"
+    repoint_if_unchanged "$LIVE_PEER" "$SEED" "$CREATED" \
+      && log "seed row repointed to $LIVE_PEER" \
+      || log "seed row repoint lost its CAS (another node got there first) — harmless, continuing"
+    SEED="$LIVE_PEER"
+    CLUSTER_STATE=existing
+    break
+  fi
+
+  log "seed $SEED unreachable, $AGE sec old, and no peer is serving — attempting conditional reclaim"
+  if repoint_if_unchanged "$PRIV_IP" "$SEED" "$CREATED"; then
     log "won reclaim — forming a new etcd cluster"
     INITIAL_CLUSTER="$NODE_ID=http://$PRIV_IP:2380"
     CLUSTER_STATE=new
