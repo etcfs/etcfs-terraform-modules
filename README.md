@@ -20,7 +20,7 @@ The node bootstrap every ASG instance runs on first boot lives at
 It is plain bash configured through `ETCFS_*` environment variables, not a
 Terraform template, so it can be linted, run directly against a test
 instance, and reused by a launcher that is not Terraform — which is what
-[etcfs-cloudformation](https://github.com/etcfs/etcfs-cloudformation) does.
+[etcfs-cloudformation-template](https://github.com/etcfs/etcfs-cloudformation-template) does.
 
 ## Prerequisite: the fencing instance profile
 
