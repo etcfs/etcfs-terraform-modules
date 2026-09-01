@@ -329,6 +329,12 @@ resource "aws_iam_role_policy" "graceful_leave" {
         Resource = "*"
       },
       {
+        Sid      = "SeedRowRepoint"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.seed_election.arn
+      },
+      {
         Sid      = "Logs"
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -346,6 +352,12 @@ resource "aws_lambda_function" "graceful_leave" {
   filename         = data.archive_file.graceful_leave.output_path
   source_code_hash = data.archive_file.graceful_leave.output_base64sha256
   timeout          = 90
+
+  environment {
+    variables = {
+      SEED_TABLE = aws_dynamodb_table.seed_election.name
+    }
+  }
 }
 
 resource "aws_cloudwatch_event_rule" "terminating" {

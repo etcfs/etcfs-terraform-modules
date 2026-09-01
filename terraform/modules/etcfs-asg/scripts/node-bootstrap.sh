@@ -255,14 +255,27 @@ if [[ "$CLUSTER_STATE" == "existing" ]]; then
     --filters "Name=tag:ClusterName,Values=$CLUSTER" "Name=tag:Role,Values=etcfs-node" \
               "Name=instance-state-name,Values=running,pending" \
     --query 'Reservations[].Instances[].PrivateIpAddress' --output text | tr '\t' '\n')
-  while read -r MID MURL; do
-    [[ -n "$MID" ]] || continue
-    MIP=$(echo "$MURL" | sed -E 's#https?://([0-9.]+):.*#\1#')
-    printf '%s\n' "${LIVE_IPS[@]}" | grep -qx "$MIP" || {
-      log "member $MID ($MIP) has no matching live instance — removing before joining"
-      etcdctl --endpoints="http://$SEED:2379" member remove "$MID" 2>/dev/null || true
-    }
-  done < <(etcdctl --endpoints="http://$SEED:2379" member list -w simple 2>/dev/null | awk -F', ' '{print $1, $4}')
+  # Fail closed on an empty result. "No live instances" is never true here —
+  # this node is joining a cluster it just reached over the network, so at
+  # minimum the seed is up. An empty list therefore means the *query* failed,
+  # not that the fleet is gone: a throttled DescribeInstances, an IAM denial,
+  # or (the case that actually bit a CloudFormation-built cluster) instances
+  # that carry no ClusterName/Role tags for the filter to match. Left
+  # unguarded the loop below matches nothing, concludes every member is
+  # orphaned, and removes the entire membership of a healthy cluster. Skipping
+  # the scrub only leaves a dead member behind for the next joiner to clear.
+  if (( ${#LIVE_IPS[@]} == 0 )); then
+    log "WARNING: peer tag-discovery returned no instances — skipping the stale-member scrub rather than removing every member"
+  else
+    while read -r MID MURL; do
+      [[ -n "$MID" ]] || continue
+      MIP=$(echo "$MURL" | sed -E 's#https?://([0-9.]+):.*#\1#')
+      printf '%s\n' "${LIVE_IPS[@]}" | grep -qx "$MIP" || {
+        log "member $MID ($MIP) has no matching live instance — removing before joining"
+        etcdctl --endpoints="http://$SEED:2379" member remove "$MID" 2>/dev/null || true
+      }
+    done < <(etcdctl --endpoints="http://$SEED:2379" member list -w simple 2>/dev/null | awk -F', ' '{print $1, $4}')
+  fi
 
   INITIAL_CLUSTER=""
   for _ in $(seq 1 15); do
