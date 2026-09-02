@@ -59,30 +59,10 @@ tar -xzf /tmp/etcd.tar.gz -C /usr/local/bin --strip-components=1 \
 chmod +x /usr/local/bin/etcd /usr/local/bin/etcdctl
 
 cd /tmp
-for pkg in etcfuse-meta etcfsctl; do
+for pkg in etcfuse etcfuse-meta etcfsctl; do
   curl -fsSLO "https://github.com/$GITHUB_REPO/releases/download/v${ETCFS_VERSION}/${pkg}-${ETCFS_VERSION}-1.x86_64.rpm"
   dnf install -y "./${pkg}-${ETCFS_VERSION}-1.x86_64.rpm"
 done
-
-# ponytail: releases up through v0.35.0 shipped an etcfuse RPM built
-# against a newer glibc than any AL2023 AMI has (GLIBC_2.38 required,
-# AL2023 tops out at 2.34) — a CI runner/target mismatch, not an
-# ASG-specific problem. etcfuse-meta/etcfsctl are Go, CGO_ENABLED=0,
-# unaffected; only the C daemon needs this. Build it from source instead of
-# installing the broken release asset, same compiler invocation
-# add-compute-node.sh uses. Fixed in CI (.github/workflows/ci.yml now
-# builds etcfuse inside amazonlinux:2023) — revert to installing the RPM
-# once a release cut *after* that fix exists; every release up to and
-# including v0.35.0 still needs this workaround.
-dnf install -y gcc fuse3-devel >/dev/null
-curl -fsSL "https://github.com/$GITHUB_REPO/archive/refs/tags/v${ETCFS_VERSION}.tar.gz" -o /tmp/etcfs-src.tar.gz
-mkdir -p /tmp/etcfs-src && tar -xzf /tmp/etcfs-src.tar.gz -C /tmp/etcfs-src --strip-components=1
-cd /tmp/etcfs-src
-gcc -I. -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -O2 -g \
-    cmd/etcfuse/main.c pkg/fuse/fuse.c pkg/fuse/ops.c pkg/block/block.c \
-    -o /usr/local/bin/etcfuse -lfuse3 -lpthread
-chmod +x /usr/local/bin/etcfuse
-cd /tmp
 
 # The WAL goes in its own directory so its fsyncs — one per Raft commit, and
 # every create, lock acquisition and extent publication is a Raft commit — do
@@ -382,24 +362,14 @@ ExecStart=/usr/local/bin/etcfuse-meta \\
 UNIT
 fi
 
-# etcfuse itself is built from source above (glibc mismatch workaround), so
-# there is no package unit to drop an override onto — write the unit whole,
-# matching deploy/systemd/etcfuse.service's shape.
-cat >/etc/systemd/system/etcfuse.service <<UNIT
-[Unit]
-Description=EtcFS FUSE Daemon
-After=network-online.target etcfuse-meta.service
-Wants=network-online.target etcfuse-meta.service
-
+# etcfuse's unit ships with its package (deploy/systemd/etcfuse.service),
+# defaulting --node-id to %H (hostname). Override it to the same NODE_ID
+# used everywhere else in this script, the one thing per-node.
+mkdir -p /etc/systemd/system/etcfuse.service.d
+cat >/etc/systemd/system/etcfuse.service.d/override.conf <<UNIT
 [Service]
-Type=simple
+ExecStart=
 ExecStart=/usr/local/bin/etcfuse --socket=/run/etcfuse/etcfuse.sock --node-id=$NODE_ID --log-level=1 /mnt/etcfuse
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
