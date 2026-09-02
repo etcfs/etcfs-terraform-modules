@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   # The node bootstrap is plain bash — not a .tftpl — precisely so it can be
   # linted here. It is the file where a quoting or expansion bug is most
@@ -14,7 +17,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: shellcheck
         run: shellcheck terraform/modules/etcfs-asg/scripts/*.sh
 
@@ -25,8 +28,8 @@ jobs:
       matrix:
         dir: [terraform, terraform-asg, terraform-eks]
     steps:
-      - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
       - name: fmt
         run: terraform -chdir=${{ matrix.dir }} fmt -check -recursive
       - name: init

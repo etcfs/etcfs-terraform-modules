@@ -1,0 +1,51 @@
+name: Security
+
+# `terraform validate` answers whether the configuration is well-formed. It says
+# nothing about whether what it describes is safe to run — an open security
+# group, an unencrypted volume, a role with a wildcard action all validate
+# cleanly. This is the half that reads the configuration for what it grants.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, because the rules move even when the configuration does not: a
+    # check added upstream applies to Terraform nobody has touched in months.
+    - cron: "47 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy (Terraform misconfiguration)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # config rather than fs: this repository has no dependencies to scan, and
+      # the whole point is the Terraform itself. secret stays on because a
+      # module that hardcoded a credential would be caught nowhere else here.
+      - name: Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scanners: misconfig,secret
+          format: sarif
+          output: trivy.sarif
+          # Reported, not enforced. Several findings here are deliberate — the
+          # shared volume is Multi-Attach by design, and the node role needs
+          # the EC2 permissions the fencing protocol calls — so a failing build
+          # would train people to ignore it. .trivyignore is where a decision
+          # gets recorded instead.
+          exit-code: "0"
+
+      - name: Upload results
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-config

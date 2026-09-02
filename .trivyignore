@@ -1,0 +1,33 @@
+# Findings that are decisions rather than defects, recorded here so the ones
+# left open are the ones that still need answering.
+#
+# Everything not listed stays reported. That is deliberate: encryption at rest
+# on the shared volume, the EKS module's public endpoint, and open egress are
+# real questions, and silencing them here would be answering them by default.
+
+# AWS-0024 — point-in-time recovery on the DynamoDB seed table.
+#
+# The table holds one row per cluster naming which node formed the etcd
+# cluster, written once at formation and never refreshed. It is a bootstrap
+# hint, not a record: a joiner that finds it stale asks the surviving peers
+# instead (see node-bootstrap.sh's find_live_peer). Restoring it to a past
+# point would restore a pointer to a node that has since been replaced, which
+# is worse than the empty table a fresh cluster starts from.
+AWS-0024
+
+# AWS-0025, AWS-0027 — customer-managed KMS keys for the table and the volume.
+#
+# These modules are meant to stand up a cluster in an account that has nothing
+# else prepared, so they create no keys and depend on none. An operator with a
+# key management policy sets it on the resources these produce; requiring one
+# here would make the common case need a key before it can start.
+AWS-0025
+AWS-0027
+
+# AWS-0066 — X-Ray tracing on the graceful-leave Lambda.
+#
+# The function runs once per scale-in and does one thing: remove the departing
+# node from etcd's membership. What it did is in its CloudWatch log, and a
+# trace across a single synchronous call adds a service dependency without
+# adding an answer.
+AWS-0066

@@ -1,0 +1,24 @@
+version: 2
+
+# The workflows here pin their actions by commit SHA, which is what makes an
+# update a reviewable change rather than a tag someone else can move. That only
+# works if something raises the pins, which is this.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+
+  # The provider constraints in the root modules. Terraform's own lock files
+  # are not committed here — these are modules, and a module that pins its
+  # provider dictates it to every caller — so this tracks the `required_providers`
+  # ranges rather than a lock.
+  - package-ecosystem: terraform
+    directories:
+      - /terraform
+      - /terraform-asg
+      - /terraform-eks
+    schedule:
+      interval: weekly
+      day: monday
