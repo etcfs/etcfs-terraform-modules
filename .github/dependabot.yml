@@ -1,24 +1,26 @@
 version: 2
 
-# The workflows here pin their actions by commit SHA, which is what makes an
-# update a reviewable change rather than a tag someone else can move. That only
-# works if something raises the pins, which is this.
+# Monthly, and grouped, so an idle month costs a few pull requests at most.
+# Minor and patch updates merge themselves through the merge queue once the
+# required checks pass; major ones — a provider's new major version usually
+# changes its configuration syntax — arrive on their own and wait for review
+# (workflows/dependabot-automerge.yml).
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
 
-  # The provider constraints in the root modules. Terraform's own lock files
-  # are not committed here — these are modules, and a module that pins its
-  # provider dictates it to every caller — so this tracks the `required_providers`
-  # ranges rather than a lock.
   - package-ecosystem: terraform
     directories:
       - /terraform
       - /terraform-asg
       - /terraform-eks
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
